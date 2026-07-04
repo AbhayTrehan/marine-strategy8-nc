@@ -176,8 +176,9 @@ def sample_probe_pool(
     tau_low: float = 0.3,
     synonyms_map: Optional[Dict[str, str]] = None,
     rng: Optional[np.random.Generator] = None,
+    min_K: Optional[int] = None,
 ) -> List[str]:
-    """Runs all three filters of Section 3.1 and returns exactly K probe
+    """Runs all three filters of Section 3.1 and returns up to K probe
     words for one image.
 
     Args:
@@ -197,13 +198,27 @@ def sample_probe_pool(
         synonyms_map: curated COCO synonym table (defaults to
             synonyms.load_coco_synonym_map()).
         rng: numpy Generator for reproducibility; defaults to a fresh one.
+        min_K: if given, and fewer than K (but at least min_K) vocabulary
+            words survive filters 1-2, silently use ALL survivors instead
+            of raising -- i.e. degrade K for just this image rather than
+            failing it outright. This matters mainly for a COCO-80-only
+            vocabulary (no --ram_tag_list_path given), where a handful of
+            images may not have quite K=80 survivors even though the
+            method is otherwise working fine; with the full RAM++ tag
+            list (thousands of words) this essentially never triggers.
+            If None (default), the original strict behavior applies: raise
+            ValueError whenever fewer than K words survive.
 
     Returns:
-        A list of exactly K probe words (raises ValueError if the
-        vocabulary doesn't have enough survivors after filters 1-2).
+        A list of probe words: exactly K unless min_K triggered a
+        graceful degradation, in which case it's between min_K and K.
+        Raises ValueError if the vocabulary doesn't have enough survivors
+        even for min_K (or for K, when min_K is None).
     """
     if K <= 0:
         raise ValueError(f"K must be positive, got {K}")
+    if min_K is not None and not (0 < min_K <= K):
+        raise ValueError(f"min_K must be in (0, K], got min_K={min_K}, K={K}")
     rng = rng if rng is not None else np.random.default_rng()
 
     # --- Filter 1: candidate exclusion ------------------------------------
@@ -220,12 +235,18 @@ def sample_probe_pool(
     # --- Filter 2: low-confidence exclusion -------------------------------
     survivors = filter_low_confidence(survivors, low_conf_score_fn, tau_low=tau_low)
 
+    effective_K = K
     if len(survivors) < K:
-        raise ValueError(
-            f"Only {len(survivors)} vocabulary words survived candidate+"
-            f"low-confidence exclusion, need K={K}. Enlarge the vocabulary "
-            f"(e.g. include the full RAM++ tag list) or raise tau_low."
-        )
+        floor = min_K if min_K is not None else K
+        if len(survivors) < floor:
+            raise ValueError(
+                f"Only {len(survivors)} vocabulary words survived candidate+"
+                f"low-confidence exclusion, need at least "
+                f"{floor}{'' if min_K is None else f' (min_K, target K={K})'}. "
+                f"Enlarge the vocabulary (e.g. include the full RAM++ tag "
+                f"list) or raise tau_low."
+            )
+        effective_K = len(survivors)  # min_K given and satisfied -> degrade gracefully
 
     # --- Filter 3: distractor bias + uniform fill -------------------------
     if distractor_scorer is not None:
@@ -235,14 +256,14 @@ def sample_probe_pool(
 
     distractor_words = [w for w, s in scored if s > 0.0]
     distractor_weights = [s for w, s in scored if s > 0.0]
-    n_distractor = min(len(distractor_words), K)
+    n_distractor = min(len(distractor_words), effective_K)
     chosen_distractors = _weighted_sample_without_replacement(
         distractor_words, distractor_weights, n_distractor, rng
     )
 
     chosen_set = set(chosen_distractors)
     fill_pool = [w for w in survivors if w not in chosen_set]
-    n_fill = K - len(chosen_distractors)
+    n_fill = effective_K - len(chosen_distractors)
     fill_choice = (
         list(rng.choice(np.array(fill_pool, dtype=object), size=n_fill, replace=False))
         if n_fill > 0

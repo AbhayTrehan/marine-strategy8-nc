@@ -28,6 +28,7 @@ export PYTHONPATH=$PYTHONPATH:/path/to/your/llava2
 
 RAM_TAG_LIST_PATH="${RAM_TAG_LIST_PATH:-}"   # e.g. $(python -c "import ram,os;print(os.path.join(os.path.dirname(ram.__file__),'data','ram_tag_list.txt'))")
 K="${K:-80}"
+MIN_K="${MIN_K:-30}"
 TAU_LOW="${TAU_LOW:-0.3}"
 SHRINKAGE="${SHRINKAGE:-}"   # empty -> analytic Ledoit-Wolf; set e.g. SHRINKAGE=0.1 to override
 N_IMAGES="${N_IMAGES:-50}"
@@ -72,7 +73,7 @@ python ./marine/strategy8-union/build_probe_pool.py \
     --image_folder "$COCO_IMAGE_DIR" \
     $RAM_TAG_ARG \
     --cooccurrence_table "$COOCCURRENCE_TABLE" \
-    --K $K --tau_low $TAU_LOW --seed $SEED \
+    --K $K --min_K $MIN_K --tau_low $TAU_LOW --seed $SEED \
     --output_file "$OUTPUT_DIR/probe_pool_cache.jsonl"
 
 echo "[4/5] Fitting the null-calibrated conformal sorter (pure numpy, fast)..."
