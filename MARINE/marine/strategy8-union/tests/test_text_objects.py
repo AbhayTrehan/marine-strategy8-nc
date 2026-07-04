@@ -47,6 +47,26 @@ def test_toilet_seat_special_case():
     print("test_toilet_seat_special_case OK")
 
 
+def test_bus_not_corrupted_to_bu():
+    # Real caption from the 500-image audit (COCO_val2014_000000061959.jpg):
+    # TextBlob's singularize() turned "bus" -> "bu", silently dropping a
+    # real MSCOCO category whenever only the VLM (not RAM/DETR) mentions it.
+    caption = "A white and orange bus is driving down the street."
+    nouns = extract_candidate_nouns(caption)
+    assert "bus" in nouns, nouns
+    assert "bu" not in nouns, nouns
+    print("test_bus_not_corrupted_to_bu OK")
+
+
+def test_tennis_not_corrupted_to_tenni():
+    # Real caption from the audit (COCO_val2014_000000062692.jpg): "tennis"
+    # -> "tenni" under the old TextBlob singularization.
+    caption = "A woman in a black shirt and white skirt is playing tennis."
+    nouns = extract_candidate_nouns(caption)
+    assert "tenni" not in nouns, nouns
+    print("test_tennis_not_corrupted_to_tenni OK")
+
+
 def test_empty_caption():
     assert extract_candidate_nouns("") == []
     assert extract_candidate_nouns("   ") == []
@@ -68,6 +88,8 @@ if __name__ == "__main__":
     test_double_word_merge()
     test_baby_animal_double_word()
     test_toilet_seat_special_case()
+    test_bus_not_corrupted_to_bu()
+    test_tennis_not_corrupted_to_tenni()
     test_empty_caption()
     test_singularization()
     print("\nALL text_objects.py TESTS PASSED")

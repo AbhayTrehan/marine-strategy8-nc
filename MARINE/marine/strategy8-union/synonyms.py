@@ -58,8 +58,9 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from textblob import TextBlob
 from nltk.corpus import wordnet as wn
+
+from singularize_utils import robust_singularize_phrase
 
 # ---------------------------------------------------------------------------
 # Reuse the existing curated synonym table from the original codebase.
@@ -78,11 +79,18 @@ from find_intersection import parse_synonyms as _parse_coco_synonyms  # noqa: E4
 # ---------------------------------------------------------------------------
 # Words that pass the WordNet physical-entity check but are noise in RAM++
 # output: "photo"/"picture" are meta-references to the image medium itself
-# (not objects in the scene); "comfort"/"fill" have an obscure physical noun
-# sense in WordNet (quilt; filling material) that RAM++ never uses.
+# (not objects in the scene); "comfort"/"fill"/"curl" have an obscure physical
+# noun sense in WordNet (quilt; filling material; a ringlet of hair) that RAM++
+# never actually intends -- RAM++ emits "curl" as a posture attribute (e.g. a
+# cat curled up), not to refer to a lock of hair, but
+# `_has_physical_noun_synset("curl")` returns True because WordNet's noun
+# sense of "curl" (hair) is itself a physical_entity. Confirmed via a
+# 500-real-caption audit: "curl" was the only RAM++ tag that survived the
+# physical-object filter across all three candidate_pool_cache.jsonl runs
+# despite never denoting a real, distinct scene object.
 _NON_OBJECT_BLOCKLIST: frozenset = frozenset({
     "photo", "picture", "selfie", "image", "shot",   # meta-image references
-    "comfort", "fill",                                 # WordNet edge cases
+    "comfort", "fill", "curl",                         # WordNet edge cases
 })
 
 _PHYSICAL_ENTITY_MARKER = "physical_entity.n.01"
@@ -141,17 +149,22 @@ def basic_clean(text: str) -> str:
 
 @lru_cache(maxsize=4096)
 def singularize(word: str) -> str:
-    """Rule-based singularization (offline, via TextBlob). Cached: this is
-    called a lot during pool construction and TextBlob's rules are pure
-    string ops, safe to memoize."""
-    if not word:
-        return word
-    parts = word.split(" ")
-    try:
-        parts[-1] = TextBlob(parts[-1]).words[0].singularize()
-    except IndexError:
-        pass
-    return " ".join(parts)
+    """Singularize the last token of `word` (see singularize_utils.py).
+
+    This used to call TextBlob's `.singularize()` directly, which blindly
+    strips a trailing "s" and mangled already-singular words such as
+    "bus" -> "bu", "tennis" -> "tenni", "grass" -> "gras", "dress" ->
+    "dres" -- several of which are real MSCOCO categories or common
+    caption words. It also compounded with text_objects.py's own (now
+    also fixed) singularization step, since candidate_pool.py feeds
+    text_objects.py's output into this canonicalizer, e.g. "glasses" ->
+    (text_objects, correct) "glass" -> (here, previously buggy) "glas".
+    Now delegates to the shared, WordNet-dictionary-backed
+    `robust_singularize_phrase`, which is idempotent and never invents a
+    non-word, so calling it here after text_objects.py already
+    singularized is safe.
+    """
+    return robust_singularize_phrase(word)
 
 
 def coco_canonical(word: str, synonyms_map: Dict[str, str]) -> Optional[str]:

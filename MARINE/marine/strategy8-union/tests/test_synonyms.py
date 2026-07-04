@@ -97,6 +97,71 @@ def test_empty_pool():
     print("test_empty_pool OK")
 
 
+def test_singularize_does_not_corrupt_already_singular_words():
+    # Real RAM tags from the audit: TextBlob's singularize() turned these
+    # into non-words ("gras", "dres") even though they were already
+    # singular and are real, common caption words.
+    for w in ["grass", "dress", "glass", "bus", "tennis", "class"]:
+        assert singularize(w) == w, (w, singularize(w))
+    print("test_singularize_does_not_corrupt_already_singular_words OK")
+
+
+def test_singularize_safe_to_apply_twice():
+    # Regression for the specific compounding bug: candidate_pool.py feeds
+    # text_objects.py's (already singularized) output into this module's
+    # singularize() a second time. "glasses" -> "glass" (text_objects) ->
+    # must NOT become "glas" here.
+    once = singularize("glasses")
+    twice = singularize(once)
+    assert once == twice, (once, twice)
+    print("test_singularize_safe_to_apply_twice OK")
+
+
+def test_bus_from_vlm_only_is_kept_as_coco_category():
+    # Before the fix, a VLM-only mention of "bus" was corrupted to "bu" by
+    # text_objects.py, which does not match the COCO synonym table and is
+    # not a recognized WordNet physical-entity noun, so it was silently
+    # dropped from the candidate pool entirely -- a real MSCOCO category
+    # vanishing whenever RAM/DETR didn't independently also tag it.
+    uc = UnionCanonicalizer()
+    raws = build_raw_mentions(ram_tags=[], detr_tags=[], vlm_objects=["bus"])
+    cands = uc.canonicalize_pool(raws)
+    assert len(cands) == 1, cands
+    assert cands[0].canonical == "bus", cands
+    assert cands[0].is_coco_category is True
+    print("test_bus_from_vlm_only_is_kept_as_coco_category OK")
+
+
+def test_grass_from_ram_keeps_correct_canonical_label():
+    # Real RAM tag "grass" was previously canonicalized to "gras". It's not
+    # a COCO category, but it IS a real WordNet physical object, so it
+    # survives the physical-object filter either way -- the bug was purely
+    # in the (mis-)spelling of its canonical label.
+    uc = UnionCanonicalizer()
+    raws = build_raw_mentions(ram_tags=["grass"], detr_tags=[], vlm_objects=[])
+    cands = uc.canonicalize_pool(raws)
+    assert len(cands) == 1, cands
+    assert cands[0].canonical == "grass", cands
+    print("test_grass_from_ram_keeps_correct_canonical_label OK")
+
+
+def test_curl_from_ram_is_filtered_as_non_object():
+    # Real RAM++ tag "curl" (emitted for a curled-up cat's posture) has a
+    # WordNet noun sense ("a ringlet of hair") that IS a physical_entity, so
+    # `_has_physical_noun_synset` alone lets it through. Confirmed via a
+    # 500-real-caption audit: across all three candidate_pool_cache.jsonl
+    # runs, "curl" was the only RAM++ tag to survive the physical-object
+    # filter while never denoting a real, distinct scene object -- it needs
+    # the explicit blocklist entry, same as "comfort"/"fill".
+    uc = UnionCanonicalizer()
+    raws = build_raw_mentions(ram_tags=["cat", "curl"], detr_tags=[], vlm_objects=[])
+    cands = uc.canonicalize_pool(raws)
+    canonicals = {c.canonical for c in cands}
+    assert "curl" not in canonicals, canonicals
+    assert "cat" in canonicals, canonicals
+    print("test_curl_from_ram_is_filtered_as_non_object OK")
+
+
 def test_provenance_tracking():
     uc = UnionCanonicalizer()
     raws = build_raw_mentions(
@@ -117,6 +182,11 @@ if __name__ == "__main__":
     test_wordnet_merge_for_noncoco_words()
     test_head_noun_merge()
     test_distinct_coco_categories_never_cross_merge()
+    test_singularize_does_not_corrupt_already_singular_words()
+    test_singularize_safe_to_apply_twice()
+    test_bus_from_vlm_only_is_kept_as_coco_category()
+    test_grass_from_ram_keeps_correct_canonical_label()
+    test_curl_from_ram_is_filtered_as_non_object()
     test_empty_pool()
     test_provenance_tracking()
     print("\nALL synonyms.py TESTS PASSED")

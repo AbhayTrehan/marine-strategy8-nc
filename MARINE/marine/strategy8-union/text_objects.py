@@ -15,14 +15,38 @@ The POS tag is determined in the full sentence context (so "sitting" in
 compound nouns (e.g. "teddy bear", "traffic light") are merged and assigned
 NN regardless of the individual token tags, since those items only exist in
 the noun compound dict.
+
+Bug fix (found via a 500-real-caption audit, see conversation/report):
+singularization here previously used TextBlob's `.singularize()`, which
+blindly strips a trailing "s" and mangles already-singular words like
+"tennis" -> "tenni" and "bus" -> "bu" ("bus" is a real MSCOCO category, so
+this was silently dropping/corrupting a real object whenever only the VLM
+-- not RAM/DETR -- mentioned it). Singularization now goes through
+`singularize_utils.robust_singularize_word`, a WordNet-dictionary-backed
+lookup that never invents a non-word (see that module's docstring for the
+full audit). Residual, non-corrupting POS-tagger noise (e.g. "sits"
+occasionally mistagged NNS after a preceding noun, producing a "sit"
+candidate) is caught by the downstream physical-object filter in
+`synonyms.py::is_likely_physical_object`, verified empirically to remove
+100% of such cases across the 500-caption audit set -- so it is not
+duplicated here to avoid a second, riskier heuristic layer (e.g.
+suffix-based demotion rules risk false positives on real object nouns
+like "building" or "wedding cake").
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Dict, List, Tuple
 
 import nltk
-from textblob import TextBlob
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
+from singularize_utils import robust_singularize_word  # noqa: E402
 
 try:
     from nltk.corpus import stopwords as _nltk_stopwords
@@ -79,13 +103,9 @@ _DOUBLE_WORD_DICT = _build_double_word_dict()
 
 
 def _singularize_token(token: str) -> str:
-    try:
-        words = TextBlob(token).words
-        if len(words) == 1:
-            return words[0].singularize()
-    except Exception:
-        pass
-    return token
+    """Singularize a single (already-tokenized) word. See module docstring
+    and singularize_utils.py for why this no longer uses TextBlob."""
+    return robust_singularize_word(token)
 
 
 def _is_candidate_token(word: str) -> bool:
