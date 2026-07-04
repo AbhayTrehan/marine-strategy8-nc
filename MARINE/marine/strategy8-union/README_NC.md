@@ -58,12 +58,10 @@ real COCO images, real LLaVA/RAM++/DETR/OWL-ViT/CLIP output):
 #    version is still usable as-is.
 
 # 1. (once) build the real object co-occurrence table for distractor bias
-python -c "
-from marine_strategy_union.cooccurrence import build_cooccurrence_table, save_cooccurrence_table
-t = build_cooccurrence_table(['./data/coco/annotations/instances_val2014.json',
-                               './data/coco/annotations/instances_train2014.json'])
-save_cooccurrence_table(t, './data/coco/cooccurrence_table.json')
-"
+python marine/strategy8-union/cooccurrence.py \
+    --instances_json ./data/coco/annotations/instances_val2014.json \
+                      ./data/coco/annotations/instances_train2014.json \
+    --output_file ./data/coco/cooccurrence_table.json
 
 # 2. sample + score the probe pool for every image (needs GPU + real images)
 python marine/strategy8-union/build_probe_pool.py \

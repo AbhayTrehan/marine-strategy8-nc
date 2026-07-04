@@ -156,3 +156,27 @@ class CooccurrenceScorer:
 
     def __call__(self, word: str) -> float:
         return self.score(word)
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build the real POPE-style object co-occurrence table from COCO instance annotations"
+    )
+    parser.add_argument("--instances_json", type=str, nargs="+", required=True,
+                        help="one or more instances_*.json paths, e.g. "
+                             "./data/coco/annotations/instances_val2014.json "
+                             "./data/coco/annotations/instances_train2014.json")
+    parser.add_argument("--output_file", type=str, required=True)
+    args = parser.parse_args()
+
+    table = build_cooccurrence_table(args.instances_json)
+    save_cooccurrence_table(table, args.output_file)
+    n_categories = len(table)
+    print(f"[Strategy8-U-NC][Co-occurrence] Built table for {n_categories} categories, "
+          f"wrote {args.output_file}")
+
+
+if __name__ == "__main__":
+    main()

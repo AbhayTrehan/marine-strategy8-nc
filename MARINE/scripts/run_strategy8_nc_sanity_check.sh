@@ -16,19 +16,23 @@
 #
 # Usage:
 #   bash scripts/run_strategy8_nc_sanity_check.sh
-#   bash scripts/run_strategy8_nc_sanity_check.sh --epsilons 0.05 0.1 0.2 --n_images 50
+#   N_IMAGES=30 EPSILONS="0.05 0.2" bash scripts/run_strategy8_nc_sanity_check.sh
+#
+# All tunable parameters below are plain shell variables with env-var
+# overrides (there is no positional/flag argument parsing in this script --
+# set them via the environment as shown above, or just edit the values below).
 
 set -e
 
 export PYTHONPATH=$PYTHONPATH:/path/to/your/llava2
 
 RAM_TAG_LIST_PATH="${RAM_TAG_LIST_PATH:-}"   # e.g. $(python -c "import ram,os;print(os.path.join(os.path.dirname(ram.__file__),'data','ram_tag_list.txt'))")
-K=80
-TAU_LOW=0.3
-SHRINKAGE=""   # empty -> analytic Ledoit-Wolf; set e.g. SHRINKAGE=0.1 to override
-N_IMAGES=50
-EPSILONS="0.05 0.1 0.2"
-SEED=242
+K="${K:-80}"
+TAU_LOW="${TAU_LOW:-0.3}"
+SHRINKAGE="${SHRINKAGE:-}"   # empty -> analytic Ledoit-Wolf; set e.g. SHRINKAGE=0.1 to override
+N_IMAGES="${N_IMAGES:-50}"
+EPSILONS="${EPSILONS:-0.05 0.1 0.2}"
+SEED="${SEED:-242}"
 
 CANDIDATE_POOL_CACHE=./output/llava2/strategy8_union/candidate_pool_cache.jsonl
 SPLIT_FILE=./output/llava2/strategy8_union/split.json
