@@ -107,6 +107,77 @@ def test_build_probe_pool_cache_deterministic_given_seed():
     print("test_build_probe_pool_cache_deterministic_given_seed OK")
 
 
+def test_build_probe_pool_cache_skips_bad_image_without_crashing_batch():
+    # img_bad's candidates ("dog", "puppy", "bench", ...) exclude almost the
+    # entire tiny vocabulary, leaving too few survivors even for min_K;
+    # img_good has a small candidate list and plenty of survivors.
+    candidate_pool_cache = {
+        "img_bad.jpg": {"candidates": [
+            {"canonical": "dog"}, {"canonical": "bench"}, {"canonical": "kite"},
+            {"canonical": "umbrella"}, {"canonical": "backpack"},
+        ]},
+        "img_good.jpg": {"candidates": [{"canonical": "dog"}]},
+    }
+    vocab = ["dog", "puppy", "bench", "kite", "umbrella", "backpack", "bicycle", "car"]
+
+    with tempfile.TemporaryDirectory() as d:
+        out_path = os.path.join(d, "probe_pool_cache.jsonl")
+        build_probe_pool_cache(
+            candidate_pool_cache=candidate_pool_cache,
+            image_dir=d,
+            feature_extractor=_StubFeatureExtractor(),
+            vocabulary=vocab,
+            K=5,
+            tau_low=0.3,
+            output_path=out_path,
+            min_K=2,
+        )
+        cache = load_probe_pool_cache(out_path)
+
+    # img_bad excludes dog/bench/kite/umbrella/backpack, leaving only
+    # bicycle+car (2 words) -- exactly at min_K=2, so it succeeds with a
+    # degraded K rather than being skipped.
+    assert "img_bad.jpg" in cache
+    assert cache["img_bad.jpg"]["K"] == 2
+    assert cache["img_bad.jpg"]["K_requested"] == 5
+    assert "img_good.jpg" in cache
+    assert cache["img_good.jpg"]["K"] == 5
+    print("test_build_probe_pool_cache_skips_bad_image_without_crashing_batch OK")
+
+
+def test_build_probe_pool_cache_truly_unsalvageable_image_is_skipped_not_crashed():
+    candidate_pool_cache = {
+        "img_impossible.jpg": {"candidates": [
+            {"canonical": "dog"}, {"canonical": "bench"}, {"canonical": "kite"},
+            {"canonical": "umbrella"}, {"canonical": "backpack"}, {"canonical": "bicycle"},
+            {"canonical": "car"},
+        ]},
+        "img_good.jpg": {"candidates": [{"canonical": "dog"}]},
+    }
+    vocab = ["dog", "puppy", "bench", "kite", "umbrella", "backpack", "bicycle", "car"]
+
+    with tempfile.TemporaryDirectory() as d:
+        out_path = os.path.join(d, "probe_pool_cache.jsonl")
+        # every vocab word except "puppy" is excluded as a candidate; only
+        # 1 survivor remains, below min_K=2 -> img_impossible must be
+        # skipped, but img_good must still succeed (no crash).
+        build_probe_pool_cache(
+            candidate_pool_cache=candidate_pool_cache,
+            image_dir=d,
+            feature_extractor=_StubFeatureExtractor(),
+            vocabulary=vocab,
+            K=5,
+            tau_low=0.3,
+            output_path=out_path,
+            min_K=2,
+        )
+        cache = load_probe_pool_cache(out_path)
+
+    assert "img_impossible.jpg" not in cache
+    assert "img_good.jpg" in cache
+    print("test_build_probe_pool_cache_truly_unsalvageable_image_is_skipped_not_crashed OK")
+
+
 if __name__ == "__main__":
     # PIL.Image.open would fail against the dummy temp dirs above (no real
     # image files) -- monkeypatch it to a no-op stub for this test module,
@@ -122,4 +193,6 @@ if __name__ == "__main__":
 
     test_build_probe_pool_cache_basic_schema_and_exclusion()
     test_build_probe_pool_cache_deterministic_given_seed()
+    test_build_probe_pool_cache_skips_bad_image_without_crashing_batch()
+    test_build_probe_pool_cache_truly_unsalvageable_image_is_skipped_not_crashed()
     print("\nALL build_probe_pool.py TESTS PASSED")

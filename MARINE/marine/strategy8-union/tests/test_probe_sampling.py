@@ -127,6 +127,58 @@ def test_sample_probe_pool_raises_when_vocabulary_too_small():
     print("test_sample_probe_pool_raises_when_vocabulary_too_small OK")
 
 
+def test_sample_probe_pool_min_k_degrades_gracefully():
+    # 8 vocabulary words survive (bench..zebra), K=10 requested, min_K=5 ->
+    # should return all 8 survivors rather than raising.
+    vocab = ["dog", "puppy", "bench", "kite", "umbrella", "backpack",
+             "bicycle", "car", "bus", "train"]
+
+    def no_detection(words):
+        return [0.0] * len(words)
+
+    rng = np.random.default_rng(0)
+    probes = sample_probe_pool(
+        vocabulary=vocab, candidate_words=["dog"], K=10, min_K=5,
+        low_conf_score_fn=no_detection, rng=rng,
+    )
+    # "dog" and "puppy" excluded (candidate + synonym), 8 remain, below K=10
+    # but above min_K=5 -> degrade to using all 8
+    assert len(probes) == 8
+    print("test_sample_probe_pool_min_k_degrades_gracefully OK")
+
+
+def test_sample_probe_pool_min_k_still_raises_below_floor():
+    vocab = ["dog", "puppy", "bench", "kite"]
+
+    def no_detection(words):
+        return [0.0] * len(words)
+
+    try:
+        sample_probe_pool(
+            vocabulary=vocab, candidate_words=["dog"], K=10, min_K=5,
+            low_conf_score_fn=no_detection,
+        )
+        assert False, "expected ValueError (only 2 survivors, below min_K=5)"
+    except ValueError:
+        pass
+    print("test_sample_probe_pool_min_k_still_raises_below_floor OK")
+
+
+def test_sample_probe_pool_invalid_min_k_raises():
+    def no_detection(words):
+        return [0.0] * len(words)
+
+    try:
+        sample_probe_pool(
+            vocabulary=["a", "b"], candidate_words=[], K=5, min_K=10,  # min_K > K
+            low_conf_score_fn=no_detection,
+        )
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    print("test_sample_probe_pool_invalid_min_k_raises OK")
+
+
 def test_sample_probe_pool_low_confidence_filter_applied():
     vocab = ["cat", "bench", "kite", "umbrella", "backpack", "bicycle", "car"]
 
@@ -236,6 +288,9 @@ if __name__ == "__main__":
     test_filter_low_confidence_mismatched_scores_raises()
     test_sample_probe_pool_excludes_candidates_and_synonyms()
     test_sample_probe_pool_raises_when_vocabulary_too_small()
+    test_sample_probe_pool_min_k_degrades_gracefully()
+    test_sample_probe_pool_min_k_still_raises_below_floor()
+    test_sample_probe_pool_invalid_min_k_raises()
     test_sample_probe_pool_low_confidence_filter_applied()
     test_sample_probe_pool_distractor_bias_prefers_high_score_words()
     test_sample_probe_pool_no_distractor_scorer_is_pure_uniform_fallback()

@@ -66,6 +66,7 @@ def build_probe_pool_cache(
     output_path: str,
     cooccurrence_table: Optional[Dict[str, Dict[str, int]]] = None,
     seed: int = 242,
+    min_K: Optional[int] = None,
 ) -> None:
     import numpy as np
 
@@ -73,6 +74,8 @@ def build_probe_pool_cache(
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
 
     n_done = 0
+    n_skipped = 0
+    n_degraded = 0
     n_total = len(candidate_pool_cache)
     with open(output_path, "w") as out_f:
         for img_file, rec in candidate_pool_cache.items():
@@ -90,16 +93,34 @@ def build_probe_pool_cache(
                 distractor_scorer = CooccurrenceScorer(cooccurrence_table, candidate_words)
 
             rng = np.random.default_rng(hash((seed, img_file)) & 0xFFFFFFFF)
-            probe_words = sample_probe_pool(
-                vocabulary=vocabulary,
-                candidate_words=candidate_words,
-                K=K,
-                low_conf_score_fn=low_conf_score_fn,
-                distractor_scorer=distractor_scorer,
-                tau_low=tau_low,
-                synonyms_map=synonyms_map,
-                rng=rng,
-            )
+            try:
+                probe_words = sample_probe_pool(
+                    vocabulary=vocabulary,
+                    candidate_words=candidate_words,
+                    K=K,
+                    low_conf_score_fn=low_conf_score_fn,
+                    distractor_scorer=distractor_scorer,
+                    tau_low=tau_low,
+                    synonyms_map=synonyms_map,
+                    rng=rng,
+                    min_K=min_K,
+                )
+            except ValueError as e:
+                # A single image with a too-small vocabulary survivor set
+                # (e.g. COCO-80-only vocabulary combined with an
+                # unusually broad candidate pool) must not kill the whole
+                # 50-image batch -- skip it, log why, keep going. This
+                # mirrors fit_null_calibration.py's own per-image
+                # warn-and-skip pattern for the same reason.
+                print(f"[Strategy8-U-NC][Probe pool] WARNING: {img_file} skipped ({e})")
+                n_skipped += 1
+                n_done += 1
+                continue
+
+            if len(probe_words) < K:
+                print(f"[Strategy8-U-NC][Probe pool] NOTE: {img_file} got only "
+                      f"{len(probe_words)}/{K} probes (min_K={min_K} allowed degrading)")
+                n_degraded += 1
 
             feats = feature_extractor.extract(image, probe_words)
             probes_out = []
@@ -109,7 +130,8 @@ def build_probe_pool_cache(
 
             out_f.write(json.dumps({
                 "image": img_file,
-                "K": K,
+                "K": len(probes_out),
+                "K_requested": K,
                 "tau_low": tau_low,
                 "probes": probes_out,
             }) + "\n")
@@ -119,7 +141,8 @@ def build_probe_pool_cache(
             if n_done % 25 == 0 or n_done == n_total:
                 print(f"[Strategy8-U-NC][Probe pool] {n_done}/{n_total} images processed")
 
-    print(f"[Strategy8-U-NC][Probe pool] Done. Cache written to {output_path}")
+    print(f"[Strategy8-U-NC][Probe pool] Done. {n_total - n_skipped}/{n_total} images written "
+          f"({n_skipped} skipped, {n_degraded} degraded below K={K}). Cache written to {output_path}")
 
 
 def load_probe_pool_cache(path: str) -> Dict[str, dict]:
@@ -148,6 +171,14 @@ def main():
     parser.add_argument("--owlvit_model", type=str, default="google/owlvit-base-patch32")
     parser.add_argument("--clip_model", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument("--K", type=int, default=80, help="probe pool size (paper: 50-100)")
+    parser.add_argument("--min_K", type=int, default=30,
+                        help="if fewer than K vocabulary words survive filters 1-2 for a given "
+                             "image, use whatever survived down to this floor instead of "
+                             "failing that image outright (must stay >= 4 for null_calibration's "
+                             "own covariance-stability floor; default 30 keeps the null model "
+                             "reasonably well-conditioned even when degraded). Pass "
+                             "--min_K 0 to disable and hard-fail on ANY image with fewer than K "
+                             "survivors instead.")
     parser.add_argument("--tau_low", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=242)
     parser.add_argument("--device", type=str, default="cuda")
@@ -180,6 +211,7 @@ def main():
         output_path=args.output_file,
         cooccurrence_table=cooccurrence_table,
         seed=args.seed,
+        min_K=(args.min_K if args.min_K > 0 else None),
     )
 
 
