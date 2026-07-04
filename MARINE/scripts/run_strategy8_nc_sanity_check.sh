@@ -50,15 +50,10 @@ print(f'Selected {len(images)} images -> $OUTPUT_DIR/sanity_check_images.json')
 
 if [ ! -f "$COOCCURRENCE_TABLE" ]; then
   echo "[2/5] Building the real object co-occurrence table (distractor bias)..."
-  python -c "
-from marine.strategy8_union.cooccurrence import build_cooccurrence_table, save_cooccurrence_table
-t = build_cooccurrence_table([
-    '$COCO_ANNOTATIONS_PATH/instances_val2014.json',
-    '$COCO_ANNOTATIONS_PATH/instances_train2014.json',
-])
-save_cooccurrence_table(t, '$COOCCURRENCE_TABLE')
-print('Wrote $COOCCURRENCE_TABLE')
-"
+  python ./marine/strategy8-union/cooccurrence.py \
+      --instances_json "$COCO_ANNOTATIONS_PATH/instances_val2014.json" \
+                        "$COCO_ANNOTATIONS_PATH/instances_train2014.json" \
+      --output_file "$COOCCURRENCE_TABLE"
 else
   echo "[2/5] Reusing existing co-occurrence table at $COOCCURRENCE_TABLE"
 fi
