@@ -120,22 +120,28 @@ def build_probe_pool_cache(
             # Extract 3D features (s_det, s_clip, s_area) via existing pipeline
             feats_3d = feature_extractor.extract(image, probe_words)
 
-            # Extract s_gdino (4th feature) via GroundingDINO
+            # Extract s_gdino (4th feature) via GroundingDINO -- omitted
+            # entirely (not a fake 0.0) when no GDINO scorer is configured,
+            # so fit_null_calibration.py's 3D-vs-4D auto-detection (which
+            # checks key PRESENCE, not value) correctly falls back to 3D
+            # rather than treating a constant placeholder as real signal.
             if gdino_scorer is not None:
-                gdino_scores = gdino_scorer.score_batch(image_path, probe_words)
+                gdino_scores = gdino_scorer.score_batch(image, probe_words)
             else:
-                gdino_scores = [0.0] * len(probe_words)
+                gdino_scores = None
 
             probes_out = []
             for i, w in enumerate(probe_words):
                 s_det, s_clip, s_area = feats_3d.get(w, (0.0, 0.0, 0.0))
-                probes_out.append({
+                probe_record = {
                     "word": w,
                     "s_det": s_det,
                     "s_clip": s_clip,
                     "s_area": s_area,
-                    "s_gdino": gdino_scores[i],
-                })
+                }
+                if gdino_scores is not None:
+                    probe_record["s_gdino"] = gdino_scores[i]
+                probes_out.append(probe_record)
 
             out_f.write(json.dumps({
                 "image": img_file,
@@ -176,10 +182,10 @@ def main():
                              "computed once and reused on subsequent runs")
     parser.add_argument("--owlvit_model", type=str, default="google/owlvit-base-patch32")
     parser.add_argument("--clip_model", type=str, default="openai/clip-vit-base-patch32")
-    parser.add_argument("--gdino_config", type=str, default=None,
-                        help="GroundingDINO config path; omit to skip s_gdino (3D mode)")
-    parser.add_argument("--gdino_weights", type=str, default=None,
-                        help="GroundingDINO weights path; omit to skip s_gdino (3D mode)")
+    parser.add_argument("--gdino_model", type=str, default=None,
+                        help="HF model name/path (e.g. IDEA-Research/grounding-dino-tiny), "
+                             "via transformers' AutoModelForZeroShotObjectDetection; "
+                             "omit to skip s_gdino (3D mode)")
     parser.add_argument("--K", type=int, default=80)
     parser.add_argument("--min_K", type=int, default=30)
     parser.add_argument("--tau_low", type=float, default=0.3)
@@ -213,16 +219,12 @@ def main():
 
     # GroundingDINO (optional — graceful fallback to 3D if not configured)
     gdino_scorer = None
-    if args.gdino_config and args.gdino_weights:
+    if args.gdino_model:
         from gdino_scorer import GDINOScorer
-        gdino_scorer = GDINOScorer(
-            config_path=args.gdino_config,
-            weights_path=args.gdino_weights,
-            device=args.device,
-        )
-        print("[Strategy8-U-NC][Probe pool] GroundingDINO loaded → 4D features")
+        gdino_scorer = GDINOScorer(model_name=args.gdino_model, device=args.device)
+        print(f"[Strategy8-U-NC][Probe pool] GroundingDINO ({args.gdino_model}) loaded → 4D features")
     else:
-        print("[Strategy8-U-NC][Probe pool] No GDINO config/weights → 3D features (s_gdino=0)")
+        print("[Strategy8-U-NC][Probe pool] No --gdino_model given → 3D features (s_gdino=0)")
 
     build_probe_pool_cache(
         candidate_pool_cache=cache,

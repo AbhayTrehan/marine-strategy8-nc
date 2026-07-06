@@ -153,6 +153,28 @@ def test_sort_result_roundtrip_4d():
     print("test_sort_result_roundtrip_4d OK")
 
 
+def test_sort_one_image_raises_on_probe_candidate_dimension_mismatch():
+    probe_feats = {f"p{i}": (0.05, 0.15, 0.0) for i in range(10)}  # 3D
+    cand_feats = {"dog": (0.8, 0.3, 0.1, 0.7)}  # 4D -- mismatch
+    try:
+        sort_one_image(cand_feats, probe_feats)
+        assert False, "expected ValueError for dimension mismatch"
+    except ValueError as e:
+        assert "3D" in str(e) or "4D" in str(e)
+    print("test_sort_one_image_raises_on_probe_candidate_dimension_mismatch OK")
+
+
+def test_sort_one_image_raises_on_inconsistent_probe_dims():
+    probe_feats = {"p1": (0.05, 0.15, 0.0), "p2": (0.05, 0.15, 0.0, 0.1)}  # inconsistent
+    cand_feats = {"dog": (0.8, 0.3, 0.1)}
+    try:
+        sort_one_image(cand_feats, probe_feats)
+        assert False, "expected ValueError for inconsistent probe dims"
+    except ValueError:
+        pass
+    print("test_sort_one_image_raises_on_inconsistent_probe_dims OK")
+
+
 if __name__ == "__main__":
     test_evidence_direction_unit_norm()
     test_build_feature_vector_3d()
@@ -166,4 +188,6 @@ if __name__ == "__main__":
     test_sort_one_image_3d()
     test_sort_one_image_4d()
     test_sort_result_roundtrip_4d()
+    test_sort_one_image_raises_on_probe_candidate_dimension_mismatch()
+    test_sort_one_image_raises_on_inconsistent_probe_dims()
     print("\nALL null_calibration.py TESTS PASSED")

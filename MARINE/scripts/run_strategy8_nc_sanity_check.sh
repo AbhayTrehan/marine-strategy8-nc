@@ -18,9 +18,8 @@ EPSILONS="${EPSILONS:-0.05 0.1 0.2}"
 SEED="${SEED:-242}"
 MAX_OWLVIT="${MAX_OWLVIT:-200}"
 
-# GroundingDINO (set these to your actual paths; empty = skip, run 3D only)
-GDINO_CONFIG="${GDINO_CONFIG:-}"
-GDINO_WEIGHTS="${GDINO_WEIGHTS:-}"
+# GroundingDINO (HF model name; empty = skip, run 3D only)
+GDINO_MODEL="${GDINO_MODEL:-}"
 
 # --- Paths ---------------------------------------------------------------
 CANDIDATE_POOL_CACHE=./output/llava2/strategy8_union/candidate_pool_cache.jsonl
@@ -43,13 +42,12 @@ print(f'Selected {len(images)} images')
 
 # =========================================================================
 echo "[2/6] Enriching candidate cache with GroundingDINO scores..."
-if [ -n "$GDINO_CONFIG" ] && [ -n "$GDINO_WEIGHTS" ]; then
+if [ -n "$GDINO_MODEL" ]; then
     if [ ! -f "$OUTPUT_DIR/candidate_pool_cache_4d.jsonl" ]; then
         python ./marine/strategy8-union/enrich_gdino.py \
             --candidate_pool_cache "$CANDIDATE_POOL_CACHE" \
             --image_folder "$COCO_IMAGE_DIR" \
-            --gdino_config "$GDINO_CONFIG" \
-            --gdino_weights "$GDINO_WEIGHTS" \
+            --gdino_model "$GDINO_MODEL" \
             --output_file "$OUTPUT_DIR/candidate_pool_cache_4d.jsonl"
         CANDIDATE_POOL_CACHE="$OUTPUT_DIR/candidate_pool_cache_4d.jsonl"
     else
@@ -57,7 +55,7 @@ if [ -n "$GDINO_CONFIG" ] && [ -n "$GDINO_WEIGHTS" ]; then
         CANDIDATE_POOL_CACHE="$OUTPUT_DIR/candidate_pool_cache_4d.jsonl"
     fi
 else
-    echo "  No GDINO_CONFIG/GDINO_WEIGHTS set → running in 3D mode (no s_gdino)"
+    echo "  No GDINO_MODEL set → running in 3D mode (no s_gdino)"
 fi
 
 # =========================================================================
@@ -67,8 +65,8 @@ if [ -n "$RAM_TAG_LIST_PATH" ]; then
     RAM_TAG_ARG="--ram_tag_list_path $RAM_TAG_LIST_PATH"
 fi
 GDINO_ARGS=""
-if [ -n "$GDINO_CONFIG" ] && [ -n "$GDINO_WEIGHTS" ]; then
-    GDINO_ARGS="--gdino_config $GDINO_CONFIG --gdino_weights $GDINO_WEIGHTS"
+if [ -n "$GDINO_MODEL" ]; then
+    GDINO_ARGS="--gdino_model $GDINO_MODEL"
 fi
 
 python ./marine/strategy8-union/build_probe_pool.py \

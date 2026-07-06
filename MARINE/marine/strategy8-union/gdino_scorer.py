@@ -3,135 +3,116 @@ gdino_scorer.py
 ================
 
 GroundingDINO-based zero-shot detection scorer, providing the 4th feature
-dimension s_gdino(w) for the Strategy 8-U-NC evidence vector. This is
-architecturally independent from the existing OWL-ViT scorer (different
-model family, different training data, different detection head), so
-agreement between the two on the same word is a much stronger signal of
-real presence than either one alone — the core motivation for adding this.
+dimension s_gdino(w) for the Strategy 8-U-NC evidence vector.
 
-Interface mirrors OwlViTScorer's score_batch exactly: given an image and a
-list of object names, returns one confidence score per name. The score is
-the maximum bounding-box logit from GroundingDINO for that text query,
-passed through a sigmoid — same convention as owlvit_postprocess.
+IMPLEMENTATION NOTE: this uses transformers' built-in GroundingDINO support
+(AutoModelForZeroShotObjectDetection, transformers>=4.40), NOT the
+standalone `groundingdino` pip package from IDEA-Research/GroundingDINO.
 
-GroundingDINO is loaded from the `groundingdino` package (DINO variant
-from the IDEA-Research/GroundingDINO repo). If the package isn't installed,
-this module raises a clear ImportError at construction time, not at import
-time — so other modules can safely `import gdino_scorer` without the
-package being present, and only fail if they actually try to instantiate
-the scorer.
+Why: the standalone package (a) requires compiling a custom CUDA extension
+(MultiScaleDeformableAttention) against a specific PyTorch/CUDA ABI, which
+frequently breaks on newer PyTorch versions (2.1+, and especially 2.6,
+where the extension's build flags/headers no longer match), and (b) loads
+its checkpoint via a raw `torch.load(..., weights_only=False)` call
+internally, which conflicts with PyTorch 2.6's new default of
+`weights_only=True` and requires patching the package itself to fix.
 
-NOTE: Like OwlViTScorer, this class requires GPU + model weights and
-cannot run in a sandbox without them. Tests use a stub scorer.
+transformers' GroundingDINO implementation avoids both problems: it's pure
+PyTorch (no custom compiled kernels), loads weights through the standard
+`from_pretrained` / safetensors path exactly like OWL-ViT and CLIP already
+do in this codebase, and is maintained against current transformers/torch
+releases. Since `transformers` is already a hard dependency here (see
+feature_extractors.py), this adds no new package at all.
+
+Interface mirrors OwlViTScorer's score_batch: given an image and a list of
+object names, returns one confidence score per name — the maximum
+detection confidence (post-sigmoid) GroundingDINO assigns to that text
+query, using a near-zero box/text threshold so the score stays a genuinely
+continuous evidence value (not pre-thresholded into a hard yes/no), the
+same design principle feature_extractors.py's OWL-ViT scorer follows.
+
+NOTE: like OwlViTScorer, this class requires GPU + downloading model
+weights and cannot run in a sandbox without that access. Tests exercise
+`_query_text` and the batching/aggregation logic via a stub subclass.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 
 class GDINOScorer:
-    """Zero-shot detector scorer using GroundingDINO: s_gdino (4th feature)."""
+    """Zero-shot detector scorer using transformers' GroundingDINO: s_gdino."""
 
     def __init__(
         self,
-        config_path: str = "groundingdino/config/GroundingDINO_SwinT_OGC.py",
-        weights_path: str = "groundingdino_swint_ogc.pth",
+        model_name: str = "IDEA-Research/grounding-dino-tiny",
         device: str = "cuda",
-        box_threshold: float = 0.01,
-        text_threshold: float = 0.01,
+        score_threshold: float = 1e-6,
     ):
-        try:
-            from groundingdino.util.inference import load_model
-        except ImportError:
-            raise ImportError(
-                "GroundingDINO is not installed. Install it from "
-                "https://github.com/IDEA-Research/GroundingDINO:\n"
-                "  pip install groundingdino\n"
-                "or clone + pip install -e . from the repo."
-            )
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         self.device = device
-        self.box_threshold = box_threshold
-        self.text_threshold = text_threshold
-        self.model = load_model(config_path, weights_path, device=device)
+        self.score_threshold = score_threshold
+        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name).to(device).eval()
 
     @staticmethod
     def _query_text(object_name: str) -> str:
-        return object_name.lower().strip()
+        """GroundingDINO expects lowercase, period-terminated phrases
+        (its text encoder segments captions on '.')."""
+        cleaned = object_name.lower().strip().rstrip(".")
+        return f"{cleaned}."
 
-    def _score_single_query(self, image_source, image_tensor, query: str) -> float:
-        """Score a single text query against the already-loaded image tensor.
-        Returns the maximum box confidence (sigmoid of logit), or 0.0 if no
-        boxes pass the threshold."""
-        from groundingdino.util.inference import predict
+    def _score_one(self, image, object_name: str) -> float:
+        """One GroundingDINO forward pass for a single text query against
+        a single image. Returns the maximum detection confidence, or 0.0
+        if literally no boxes survive even a near-zero threshold (i.e.
+        the query produced no signal at all)."""
+        import torch
 
-        boxes, logits, phrases = predict(
-            model=self.model,
-            image=image_tensor,
-            caption=query,
-            box_threshold=self.box_threshold,
-            text_threshold=self.text_threshold,
-            device=self.device,
-        )
+        text = self._query_text(object_name)
+        inputs = self.processor(images=image, text=text, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        if len(logits) == 0:
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        w, h = image.size  # PIL Image: (width, height)
+        results = self.processor.post_process_grounded_object_detection(
+            outputs,
+            inputs["input_ids"],
+            box_threshold=self.score_threshold,
+            text_threshold=self.score_threshold,
+            target_sizes=[(h, w)],
+        )[0]
+
+        scores = results["scores"]
+        if scores.numel() == 0:
             return 0.0
-        return float(logits.max().item())
+        return float(scores.max().item())
 
-    def score_batch(self, image_path_or_pil, object_names: Sequence[str]) -> List[float]:
-        """Score ALL `object_names` against a single image.
+    def score_batch(self, image, object_names: Sequence[str]) -> List[float]:
+        """Score ALL `object_names` against a single `image`.
 
-        Unlike OWL-ViT (which natively batches multiple text queries in one
-        forward pass), GroundingDINO's standard inference API processes one
-        text caption at a time. We call it per-query, but the image encoding
-        is cached internally by the model, so the per-query overhead is
-        primarily the text encoder + cross-attention, not a full re-encode
-        of the image.
-
-        Args:
-            image_path_or_pil: either a file path (str) or a PIL.Image.
-                GroundingDINO's load_image expects a path, so if given a
-                PIL image, we handle the conversion.
-            object_names: list of object words to score.
-
-        Returns:
-            list of s_gdino scores, one per object_name, same order.
+        Unlike OWL-ViT (which natively batches multiple text queries into
+        one forward pass), GroundingDINO's caption-conditioned architecture
+        processes one text query at a time here — each call re-encodes the
+        image, so cost scales with len(object_names). This is why
+        probe_sampling's CLIP shortlisting step (Filter 1.5) matters: it
+        keeps the number of words reaching this function bounded (e.g.
+        ~200) regardless of vocabulary size.
         """
         if len(object_names) == 0:
             return []
-
-        from groundingdino.util.inference import load_image
-        import numpy as np
-        from PIL import Image as PILImage
-
-        if isinstance(image_path_or_pil, str):
-            image_source, image_tensor = load_image(image_path_or_pil)
-        elif isinstance(image_path_or_pil, PILImage.Image):
-            # GroundingDINO's load_image reads from a file path; convert
-            # PIL -> the same (numpy_source, tensor) format it produces.
-            import torch
-            from torchvision import transforms
-
-            img_rgb = image_path_or_pil.convert("RGB")
-            image_source = np.array(img_rgb)
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ])
-            image_tensor = transform(img_rgb)
-        else:
-            raise TypeError(f"Expected str path or PIL Image, got {type(image_path_or_pil)}")
-
-        results: List[float] = []
+        results = []
         for name in object_names:
-            query = self._query_text(name)
             try:
-                s = self._score_single_query(image_source, image_tensor, query)
-            except Exception:
+                s = self._score_one(image, name)
+            except Exception as e:
+                print(f"[GDINOScorer] WARNING: query '{name}' failed ({e}), scoring 0.0")
                 s = 0.0
             results.append(s)
-
         return results
 
     def score_map(self, image, object_names: Sequence[str]) -> Dict[str, float]:

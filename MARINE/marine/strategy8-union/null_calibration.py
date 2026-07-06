@@ -292,6 +292,30 @@ def sort_one_image(
         raise ValueError(f"Need at least 5 probes, got {len(probe_features)}")
 
     probe_names = list(probe_features.keys())
+    probe_dims = {len(v) for v in probe_features.values()}
+    if len(probe_dims) > 1:
+        raise ValueError(
+            f"Inconsistent feature dimensions across probes: {sorted(probe_dims)}. "
+            f"Every probe must have the same number of raw feature values "
+            f"(all 3D, or all 4D with s_gdino included)."
+        )
+    if candidate_features:
+        cand_dims = {len(v) for v in candidate_features.values()}
+        if len(cand_dims) > 1:
+            raise ValueError(
+                f"Inconsistent feature dimensions across candidates: {sorted(cand_dims)}."
+            )
+        d_cand = next(iter(cand_dims))
+        d_probe = next(iter(probe_dims))
+        if d_cand != d_probe:
+            raise ValueError(
+                f"Candidate features are {d_cand}D but probe features are {d_probe}D. "
+                f"This usually means candidates were enriched with s_gdino "
+                f"(enrich_gdino.py) but probes weren't (build_probe_pool.py "
+                f"without --gdino_model), or vice versa -- both sides must "
+                f"use the SAME feature set for a given run."
+            )
+
     probe_raw = build_feature_matrix([probe_features[p] for p in probe_names], sqrt_indices=sqrt_indices)
     d = probe_raw.shape[1]
 

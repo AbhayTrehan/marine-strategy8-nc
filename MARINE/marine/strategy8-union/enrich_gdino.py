@@ -12,8 +12,7 @@ Usage (on the server):
     python marine/strategy8-union/enrich_gdino.py \\
         --candidate_pool_cache ./output/llava2/strategy8_union/candidate_pool_cache.jsonl \\
         --image_folder ./data/coco/val2014 \\
-        --gdino_config groundingdino/config/GroundingDINO_SwinT_OGC.py \\
-        --gdino_weights groundingdino_swint_ogc.pth \\
+        --gdino_model IDEA-Research/grounding-dino-tiny \\
         --output_file ./output/llava2/strategy8_union_nc/candidate_pool_cache_4d.jsonl
 """
 
@@ -51,7 +50,8 @@ def enrich_candidate_cache_with_gdino(
 
             image_path = os.path.join(image_dir, img_file)
             if words:
-                gdino_scores = gdino_scorer.score_batch(image_path, words)
+                image = Image.open(image_path).convert("RGB")
+                gdino_scores = gdino_scorer.score_batch(image, words)
             else:
                 gdino_scores = []
 
@@ -77,10 +77,8 @@ def main():
     parser = argparse.ArgumentParser(description="Add GroundingDINO scores to candidate_pool_cache")
     parser.add_argument("--candidate_pool_cache", type=str, required=True)
     parser.add_argument("--image_folder", type=str, default="./data/coco/val2014")
-    parser.add_argument("--gdino_config", type=str,
-                        default="groundingdino/config/GroundingDINO_SwinT_OGC.py")
-    parser.add_argument("--gdino_weights", type=str,
-                        default="groundingdino_swint_ogc.pth")
+    parser.add_argument("--gdino_model", type=str, default="IDEA-Research/grounding-dino-tiny",
+                        help="HF model name/path (via transformers' AutoModelForZeroShotObjectDetection)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_file", type=str, required=True)
     args = parser.parse_args()
@@ -89,11 +87,7 @@ def main():
     from gdino_scorer import GDINOScorer
 
     cache = load_candidate_pool_cache(args.candidate_pool_cache)
-    scorer = GDINOScorer(
-        config_path=args.gdino_config,
-        weights_path=args.gdino_weights,
-        device=args.device,
-    )
+    scorer = GDINOScorer(model_name=args.gdino_model, device=args.device)
 
     enrich_candidate_cache_with_gdino(cache, args.image_folder, scorer, args.output_file)
 
