@@ -131,6 +131,48 @@ class OwlViTScorer:
         return dict(zip(object_names, scores))
 
 
+def _unwrap_clip_pooled_features(result):
+    """transformers' CLIPModel.get_text_features()/get_image_features()
+    are documented to return a plain (batch, dim) tensor. Empirically,
+    after upgrading transformers (needed separately for GroundingDINO
+    support), get_text_features has been observed to instead return a
+    ModelOutput-like object (e.g. BaseModelOutputWithPooling) exposing the
+    pooled/projected tensor via an attribute rather than as the bare
+    return value. Handle both so ClipScorer doesn't silently depend on
+    exactly which transformers version is installed -- the same
+    "don't trust a version-specific convenience contract" principle this
+    module already applies to OWL-ViT's post-processing (see
+    owlvit_postprocess's docstring).
+
+    Prefers .text_embeds / .image_embeds (the correct, projected
+    embedding -- exactly what get_text_features/get_image_features should
+    themselves return), falls back to .pooler_output with a warning
+    (approximate: pre-projection, dimension may differ from the rest of
+    the pipeline's cached embeddings, so this path being hit at all is
+    worth knowing about even though it avoids a hard crash).
+    """
+    if torch.is_tensor(result):
+        return result
+    for attr in ("text_embeds", "image_embeds"):
+        val = getattr(result, attr, None)
+        if val is not None:
+            return val
+    pooler = getattr(result, "pooler_output", None)
+    if pooler is not None:
+        print(
+            "[ClipScorer] WARNING: get_text/image_features() returned a "
+            f"{type(result).__name__} with no .text_embeds/.image_embeds; "
+            "falling back to .pooler_output (pre-projection -- verify this "
+            "matches the dimensionality used elsewhere in the pipeline)."
+        )
+        return pooler
+    raise TypeError(
+        f"Could not extract a pooled embedding tensor from CLIP output of "
+        f"type {type(result)}; expected a plain tensor, or an object "
+        f"exposing .text_embeds / .image_embeds / .pooler_output."
+    )
+
+
 class ClipScorer:
     """Image-text similarity scorer: s_clip (Eq. 5)."""
 
@@ -149,7 +191,7 @@ class ClipScorer:
     def _image_embedding(self, image) -> torch.Tensor:
         inputs = self.processor(images=[image], return_tensors="pt")
         pixel_values = inputs["pixel_values"].to(self.device)
-        emb = self.model.get_image_features(pixel_values=pixel_values)  # (1, D)
+        emb = _unwrap_clip_pooled_features(self.model.get_image_features(pixel_values=pixel_values))
         return emb / emb.norm(p=2, dim=-1, keepdim=True)
 
     @torch.no_grad()
@@ -157,7 +199,7 @@ class ClipScorer:
         queries = [self._query_text(o) for o in object_names]
         inputs = self.processor(text=queries, return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        emb = self.model.get_text_features(**inputs)  # (N, D)
+        emb = _unwrap_clip_pooled_features(self.model.get_text_features(**inputs))
         return emb / emb.norm(p=2, dim=-1, keepdim=True)
 
     @torch.no_grad()
