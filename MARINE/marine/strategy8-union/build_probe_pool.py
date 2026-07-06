@@ -2,39 +2,25 @@
 build_probe_pool.py
 ====================
 
-Strategy 8-U-NC's counterpart to candidate_pool.py: for every image already
-present in an existing candidate_pool_cache.jsonl (Strategy 8-U's Step A --
-UNCHANGED, reused as-is), this script samples that image's guaranteed-absent
-probe pool P (probe_sampling.py, Section 3.1) and extracts each probe's real
-3D feature vector using the EXACT SAME feature pipeline as the candidates
-(feature_extractors.py::FeatureExtractor -- Section 3.2's "using exactly the
-same feature pipeline regardless of whether w is a candidate or a probe").
+Strategy 8-U-NC probe pool construction: for every image in an existing
+candidate_pool_cache.jsonl, samples guaranteed-absent probes and extracts
+their FULL feature vectors (s_det, s_clip, s_area, s_gdino — 4D).
 
-This is a REAL script: it needs the real image files (MARINE/data/coco/val2014)
-and the real OWL-ViT/CLIP models (GPU), exactly like candidate_pool.py, and
-cannot be executed in a sandbox without that access -- run it on the same
-server/environment candidate_pool.py already ran on.
-
-Output schema (one JSON object per line, mirroring candidate_pool.py):
-{
-  "image": "COCO_val2014_000000144305.jpg",
-  "K": 80,
-  "tau_low": 0.3,
-  "probes": [
-    {"word": "chair", "s_det": 0.05, "s_clip": 0.18, "s_area": 0.0},
-    ...
-  ]
-}
+Key changes from the original 3D version:
+  - Loads the full RAM++ vocabulary (~4500 words), not just COCO-80
+  - Uses CLIP semantic shortlisting (clip_distractor_scorer.py) to keep
+    OWL-ViT cost bounded when vocabulary is large
+  - Queries GroundingDINO for s_gdino (4th feature) for every probe
+  - Replaces the corpus-fit co-occurrence table with the training-free
+    CLIP semantic distractor scorer
 
 Usage (on the server):
     python marine/strategy8-union/build_probe_pool.py \\
-        --candidate_pool_cache ./output/llava2/strategy8_union/candidate_pool_cache.jsonl \\
+        --candidate_pool_cache ./output/llava2/strategy8_union_nc/candidate_pool_cache_4d.jsonl \\
         --image_folder ./data/coco/val2014 \\
-        --ram_tag_list_path <path to ram package's ram_tag_list.txt> \\
-        --cooccurrence_table ./data/coco/cooccurrence_table.json \\
-        --coco_annotations_path ./data/coco/annotations \\
+        --ram_tag_list_path $(python -c "import ram,os;print(os.path.join(os.path.dirname(ram.__file__),'data','ram_tag_list.txt'))") \\
         --K 80 --tau_low 0.3 \\
-        --output_file ./output/llava2/strategy8_union_nc/probe_pool_cache.jsonl
+        --output_file ./output/llava2/strategy8_union_nc/probe_pool_cache_4d.jsonl
 """
 
 from __future__ import annotations
@@ -43,7 +29,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from PIL import Image
 
@@ -51,7 +37,11 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from cooccurrence import CooccurrenceScorer, load_cooccurrence_table  # noqa: E402
+from clip_distractor_scorer import (  # noqa: E402
+    ClipSemanticDistractorScorer,
+    precompute_vocabulary_embeddings,
+    shortlist_by_semantic_relevance,
+)
 from probe_sampling import load_default_vocabulary, sample_probe_pool  # noqa: E402
 from synonyms import load_coco_synonym_map  # noqa: E402
 
@@ -60,13 +50,15 @@ def build_probe_pool_cache(
     candidate_pool_cache: Dict[str, dict],
     image_dir: str,
     feature_extractor,
+    gdino_scorer,
     vocabulary: List[str],
+    vocab_embeddings,
     K: int,
     tau_low: float,
     output_path: str,
-    cooccurrence_table: Optional[Dict[str, Dict[str, int]]] = None,
     seed: int = 242,
     min_K: Optional[int] = None,
+    max_owlvit_candidates: int = 200,
 ) -> None:
     import numpy as np
 
@@ -80,17 +72,25 @@ def build_probe_pool_cache(
     with open(output_path, "w") as out_f:
         for img_file, rec in candidate_pool_cache.items():
             candidate_words = [c["canonical"] for c in rec["candidates"]]
-            image = Image.open(os.path.join(image_dir, img_file)).convert("RGB")
+            image_path = os.path.join(image_dir, img_file)
+            image = Image.open(image_path).convert("RGB")
 
-            # Filter 2 needs a REAL, image-bound s_det scorer: one OWL-ViT
-            # forward pass per candidate probe-word batch, against THIS image.
             def low_conf_score_fn(words, _image=image):
                 det_area = feature_extractor.owlvit.score_batch(_image, words)
                 return [s_det for s_det, _s_area in det_area]
 
-            distractor_scorer = None
-            if cooccurrence_table is not None:
-                distractor_scorer = CooccurrenceScorer(cooccurrence_table, candidate_words)
+            # CLIP-based distractor scorer (training-free, replaces co-occurrence table)
+            distractor_scorer = ClipSemanticDistractorScorer(
+                vocabulary, vocab_embeddings, candidate_words
+            )
+
+            # CLIP-based shortlisting (keeps OWL-ViT cost bounded)
+            def shortlist_fn(survivors, _cands=candidate_words, _rng_seed=(seed, img_file)):
+                _rng = np.random.default_rng(hash(_rng_seed) & 0xFFFFFFFF)
+                return shortlist_by_semantic_relevance(
+                    survivors, vocabulary, vocab_embeddings, _cands,
+                    max_shortlist=max_owlvit_candidates, rng=_rng,
+                )
 
             rng = np.random.default_rng(hash((seed, img_file)) & 0xFFFFFFFF)
             try:
@@ -104,29 +104,38 @@ def build_probe_pool_cache(
                     synonyms_map=synonyms_map,
                     rng=rng,
                     min_K=min_K,
+                    shortlist_fn=shortlist_fn,
                 )
             except ValueError as e:
-                # A single image with a too-small vocabulary survivor set
-                # (e.g. COCO-80-only vocabulary combined with an
-                # unusually broad candidate pool) must not kill the whole
-                # 50-image batch -- skip it, log why, keep going. This
-                # mirrors fit_null_calibration.py's own per-image
-                # warn-and-skip pattern for the same reason.
                 print(f"[Strategy8-U-NC][Probe pool] WARNING: {img_file} skipped ({e})")
                 n_skipped += 1
                 n_done += 1
                 continue
 
             if len(probe_words) < K:
-                print(f"[Strategy8-U-NC][Probe pool] NOTE: {img_file} got only "
-                      f"{len(probe_words)}/{K} probes (min_K={min_K} allowed degrading)")
+                print(f"[Strategy8-U-NC][Probe pool] NOTE: {img_file} got "
+                      f"{len(probe_words)}/{K} probes")
                 n_degraded += 1
 
-            feats = feature_extractor.extract(image, probe_words)
+            # Extract 3D features (s_det, s_clip, s_area) via existing pipeline
+            feats_3d = feature_extractor.extract(image, probe_words)
+
+            # Extract s_gdino (4th feature) via GroundingDINO
+            if gdino_scorer is not None:
+                gdino_scores = gdino_scorer.score_batch(image_path, probe_words)
+            else:
+                gdino_scores = [0.0] * len(probe_words)
+
             probes_out = []
-            for w in probe_words:
-                s_det, s_clip, s_area = feats.get(w, (0.0, 0.0, 0.0))
-                probes_out.append({"word": w, "s_det": s_det, "s_clip": s_clip, "s_area": s_area})
+            for i, w in enumerate(probe_words):
+                s_det, s_clip, s_area = feats_3d.get(w, (0.0, 0.0, 0.0))
+                probes_out.append({
+                    "word": w,
+                    "s_det": s_det,
+                    "s_clip": s_clip,
+                    "s_area": s_area,
+                    "s_gdino": gdino_scores[i],
+                })
 
             out_f.write(json.dumps({
                 "image": img_file,
@@ -141,8 +150,8 @@ def build_probe_pool_cache(
             if n_done % 25 == 0 or n_done == n_total:
                 print(f"[Strategy8-U-NC][Probe pool] {n_done}/{n_total} images processed")
 
-    print(f"[Strategy8-U-NC][Probe pool] Done. {n_total - n_skipped}/{n_total} images written "
-          f"({n_skipped} skipped, {n_degraded} degraded below K={K}). Cache written to {output_path}")
+    print(f"[Strategy8-U-NC][Probe pool] Done. {n_total - n_skipped}/{n_total} written "
+          f"({n_skipped} skipped, {n_degraded} degraded). → {output_path}")
 
 
 def load_probe_pool_cache(path: str) -> Dict[str, dict]:
@@ -158,28 +167,24 @@ def load_probe_pool_cache(path: str) -> Dict[str, dict]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Strategy8-U-NC: probe pool sampling + feature extraction")
-    parser.add_argument("--candidate_pool_cache", type=str, required=True,
-                        help="existing candidate_pool_cache.jsonl from candidate_pool.py (Step A, unchanged)")
+    parser = argparse.ArgumentParser(description="Strategy8-U-NC: 4D probe pool construction")
+    parser.add_argument("--candidate_pool_cache", type=str, required=True)
     parser.add_argument("--image_folder", type=str, default="./data/coco/val2014")
-    parser.add_argument("--ram_tag_list_path", type=str, default=None,
-                        help="path to the `ram` package's bundled ram_tag_list.txt; "
-                             "if omitted, vocabulary V falls back to COCO-80 only")
-    parser.add_argument("--cooccurrence_table", type=str, default=None,
-                        help="JSON produced by cooccurrence.build_cooccurrence_table "
-                             "(needs data/coco/annotations); omit to disable distractor bias")
+    parser.add_argument("--ram_tag_list_path", type=str, default=None)
+    parser.add_argument("--vocab_embeddings_cache", type=str, default=None,
+                        help="path to .npy cache of CLIP text embeddings for the vocabulary; "
+                             "computed once and reused on subsequent runs")
     parser.add_argument("--owlvit_model", type=str, default="google/owlvit-base-patch32")
     parser.add_argument("--clip_model", type=str, default="openai/clip-vit-base-patch32")
-    parser.add_argument("--K", type=int, default=80, help="probe pool size (paper: 50-100)")
-    parser.add_argument("--min_K", type=int, default=30,
-                        help="if fewer than K vocabulary words survive filters 1-2 for a given "
-                             "image, use whatever survived down to this floor instead of "
-                             "failing that image outright (must stay >= 4 for null_calibration's "
-                             "own covariance-stability floor; default 30 keeps the null model "
-                             "reasonably well-conditioned even when degraded). Pass "
-                             "--min_K 0 to disable and hard-fail on ANY image with fewer than K "
-                             "survivors instead.")
+    parser.add_argument("--gdino_config", type=str, default=None,
+                        help="GroundingDINO config path; omit to skip s_gdino (3D mode)")
+    parser.add_argument("--gdino_weights", type=str, default=None,
+                        help="GroundingDINO weights path; omit to skip s_gdino (3D mode)")
+    parser.add_argument("--K", type=int, default=80)
+    parser.add_argument("--min_K", type=int, default=30)
     parser.add_argument("--tau_low", type=float, default=0.3)
+    parser.add_argument("--max_owlvit_candidates", type=int, default=200,
+                        help="max words sent to OWL-ViT per image (CLIP shortlisting reduces V to this)")
     parser.add_argument("--seed", type=int, default=242)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_file", type=str, required=True)
@@ -191,27 +196,47 @@ def main():
     cache = load_candidate_pool_cache(args.candidate_pool_cache)
 
     vocabulary = load_default_vocabulary(ram_tag_list_path=args.ram_tag_list_path)
-    print(f"[Strategy8-U-NC][Probe pool] Vocabulary V size: {len(vocabulary)} words"
-          + (" (COCO-80 only -- pass --ram_tag_list_path for the full paper-spec vocabulary)"
-             if args.ram_tag_list_path is None else ""))
-
-    cooccurrence_table = None
-    if args.cooccurrence_table:
-        cooccurrence_table = load_cooccurrence_table(args.cooccurrence_table)
+    print(f"[Strategy8-U-NC][Probe pool] Vocabulary V: {len(vocabulary)} words")
 
     feature_extractor = FeatureExtractor(args.owlvit_model, args.clip_model, device=args.device)
+
+    # Precompute CLIP text embeddings for the entire vocabulary (once)
+    embed_cache = args.vocab_embeddings_cache
+    if embed_cache is None:
+        embed_cache = os.path.join(
+            os.path.dirname(os.path.abspath(args.output_file)),
+            "vocab_clip_embeddings.npy"
+        )
+    vocab_embeddings = precompute_vocabulary_embeddings(
+        feature_extractor.clip, vocabulary, cache_path=embed_cache
+    )
+
+    # GroundingDINO (optional — graceful fallback to 3D if not configured)
+    gdino_scorer = None
+    if args.gdino_config and args.gdino_weights:
+        from gdino_scorer import GDINOScorer
+        gdino_scorer = GDINOScorer(
+            config_path=args.gdino_config,
+            weights_path=args.gdino_weights,
+            device=args.device,
+        )
+        print("[Strategy8-U-NC][Probe pool] GroundingDINO loaded → 4D features")
+    else:
+        print("[Strategy8-U-NC][Probe pool] No GDINO config/weights → 3D features (s_gdino=0)")
 
     build_probe_pool_cache(
         candidate_pool_cache=cache,
         image_dir=args.image_folder,
         feature_extractor=feature_extractor,
+        gdino_scorer=gdino_scorer,
         vocabulary=vocabulary,
+        vocab_embeddings=vocab_embeddings,
         K=args.K,
         tau_low=args.tau_low,
         output_path=args.output_file,
-        cooccurrence_table=cooccurrence_table,
         seed=args.seed,
         min_K=(args.min_K if args.min_K > 0 else None),
+        max_owlvit_candidates=args.max_owlvit_candidates,
     )
 
 

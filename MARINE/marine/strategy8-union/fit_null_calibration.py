@@ -33,16 +33,28 @@ from prompts import build_tristate_prompts
 # ---------------------------------------------------------------------------
 # Step 1: sort every image (pure numpy, no model calls)
 # ---------------------------------------------------------------------------
+def _extract_feature_tuple(record: dict, feature_keys: tuple = ("s_det", "s_clip", "s_area", "s_gdino")) -> tuple:
+    """Extract available feature values from a candidate/probe record,
+    in a fixed order. If s_gdino is missing (3D cache), returns a 3-tuple;
+    if present (4D cache), returns a 4-tuple. Both are handled correctly
+    by the dimension-agnostic null_calibration.sort_one_image."""
+    values = []
+    for key in feature_keys:
+        if key in record:
+            values.append(record[key])
+        else:
+            break  # stop at first missing key (don't skip gaps)
+    return tuple(values)
+
+
 def sort_all_images(
     candidate_pool_cache: Dict[str, dict],
     probe_pool_cache: Dict[str, dict],
     shrinkage: Optional[float] = None,
     image_filter: Optional[List[str]] = None,
 ) -> Dict[str, ConformalSortResult]:
-    """Runs sort_one_image for every image present in BOTH caches (an
-    image missing from probe_pool_cache -- e.g. build_probe_pool.py hasn't
-    been run for it yet -- is silently skipped with a printed warning
-    rather than crashing the whole batch)."""
+    """Runs sort_one_image for every image present in BOTH caches.
+    Automatically detects 3D vs 4D features from the cache records."""
     image_filter_set = set(image_filter) if image_filter is not None else None
     results: Dict[str, ConformalSortResult] = {}
 
@@ -55,9 +67,11 @@ def sort_all_images(
             continue
 
         candidate_features = {
-            c["canonical"]: (c["s_det"], c["s_clip"], c["s_area"]) for c in cand_rec["candidates"]
+            c["canonical"]: _extract_feature_tuple(c) for c in cand_rec["candidates"]
         }
-        probe_features = {p["word"]: (p["s_det"], p["s_clip"], p["s_area"]) for p in probe_rec["probes"]}
+        probe_features = {
+            p["word"]: _extract_feature_tuple(p) for p in probe_rec["probes"]
+        }
 
         try:
             results[img] = sort_one_image(candidate_features, probe_features, shrinkage=shrinkage)

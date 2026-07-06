@@ -177,9 +177,9 @@ def sample_probe_pool(
     synonyms_map: Optional[Dict[str, str]] = None,
     rng: Optional[np.random.Generator] = None,
     min_K: Optional[int] = None,
+    shortlist_fn: Optional[Callable[[Sequence[str]], List[str]]] = None,
 ) -> List[str]:
-    """Runs all three filters of Section 3.1 and returns up to K probe
-    words for one image.
+    """Runs all filters of Section 3.1 and returns up to K probe words.
 
     Args:
         vocabulary: the fixed object vocabulary V (COCO-80 + RAM++ tag
@@ -189,31 +189,25 @@ def sample_probe_pool(
         low_conf_score_fn: batched s_det scorer against the REAL image
             (filter 2); in production, OwlViTScorer.score_batch bound to
             this image.
-        distractor_scorer: optional callable word -> co-occurrence score
-            (filter 3); higher = more likely to preferentially sample. If
-            None, filter 3 degenerates to pure uniform sampling (a
-            legitimate ablation, not an error -- distractor bias is a bonus
-            on top of a valid probe pool, not a correctness requirement).
+        distractor_scorer: optional callable word -> semantic relevance
+            score (filter 3); higher = more likely to preferentially
+            sample. If None, filter 3 degenerates to pure uniform sampling.
         tau_low: permissive low-confidence threshold (Section 3.1: e.g. 0.3).
-        synonyms_map: curated COCO synonym table (defaults to
-            synonyms.load_coco_synonym_map()).
-        rng: numpy Generator for reproducibility; defaults to a fresh one.
-        min_K: if given, and fewer than K (but at least min_K) vocabulary
-            words survive filters 1-2, silently use ALL survivors instead
-            of raising -- i.e. degrade K for just this image rather than
-            failing it outright. This matters mainly for a COCO-80-only
-            vocabulary (no --ram_tag_list_path given), where a handful of
-            images may not have quite K=80 survivors even though the
-            method is otherwise working fine; with the full RAM++ tag
-            list (thousands of words) this essentially never triggers.
-            If None (default), the original strict behavior applies: raise
-            ValueError whenever fewer than K words survive.
+        synonyms_map: curated COCO synonym table.
+        rng: numpy Generator for reproducibility.
+        min_K: graceful degradation floor (see docstring in previous version).
+        shortlist_fn: optional callable (survivors) -> shortlisted_survivors,
+            inserted between Filter 1 (exclusion) and Filter 2 (OWL-ViT).
+            When V is large (~4500 words with RAM++ tags), this keeps the
+            expensive OWL-ViT call bounded by narrowing survivors to a
+            fixed-size shortlist first (see clip_distractor_scorer.
+            shortlist_by_semantic_relevance). If None, all Filter 1
+            survivors go directly to Filter 2 (fine for small V like
+            COCO-80-only).
 
     Returns:
         A list of probe words: exactly K unless min_K triggered a
         graceful degradation, in which case it's between min_K and K.
-        Raises ValueError if the vocabulary doesn't have enough survivors
-        even for min_K (or for K, when min_K is None).
     """
     if K <= 0:
         raise ValueError(f"K must be positive, got {K}")
@@ -231,6 +225,12 @@ def sample_probe_pool(
             continue
         seen.add(cw)
         survivors.append(w)
+
+    # --- Filter 1.5: CLIP semantic shortlisting (optional) ----------------
+    # When V is large, narrow survivors BEFORE the expensive OWL-ViT check
+    # so that OWL-ViT cost stays ~constant regardless of vocabulary size.
+    if shortlist_fn is not None:
+        survivors = shortlist_fn(survivors)
 
     # --- Filter 2: low-confidence exclusion -------------------------------
     survivors = filter_low_confidence(survivors, low_conf_score_fn, tau_low=tau_low)
