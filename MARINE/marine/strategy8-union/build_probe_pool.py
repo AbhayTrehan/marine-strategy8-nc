@@ -59,18 +59,32 @@ def build_probe_pool_cache(
     seed: int = 242,
     min_K: Optional[int] = None,
     max_owlvit_candidates: int = 200,
+    image_filter: Optional[List[str]] = None,
 ) -> None:
     import numpy as np
 
     synonyms_map = load_coco_synonym_map()
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
 
+    if image_filter is not None:
+        image_filter_set = set(image_filter)
+        items = [(img, rec) for img, rec in candidate_pool_cache.items() if img in image_filter_set]
+        missing = image_filter_set - set(candidate_pool_cache.keys())
+        if missing:
+            print(f"[Strategy8-U-NC][Probe pool] WARNING: {len(missing)} of "
+                  f"{len(image_filter_set)} requested images are NOT in the "
+                  f"candidate cache and will be skipped entirely (never "
+                  f"reach probe building, fitting, OR the histogram): "
+                  f"{sorted(missing)[:10]}{'...' if len(missing) > 10 else ''}")
+    else:
+        items = list(candidate_pool_cache.items())
+
     n_done = 0
     n_skipped = 0
     n_degraded = 0
-    n_total = len(candidate_pool_cache)
+    n_total = len(items)
     with open(output_path, "w") as out_f:
-        for img_file, rec in candidate_pool_cache.items():
+        for img_file, rec in items:
             candidate_words = [c["canonical"] for c in rec["candidates"]]
             image_path = os.path.join(image_dir, img_file)
             image = Image.open(image_path).convert("RGB")
@@ -193,6 +207,9 @@ def main():
                         help="max words sent to OWL-ViT per image (CLIP shortlisting reduces V to this)")
     parser.add_argument("--seed", type=int, default=242)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--image_list_file", type=str, default=None,
+                        help="JSON list of image filenames to process; if omitted, all images "
+                             "in the candidate cache are processed")
     parser.add_argument("--output_file", type=str, required=True)
     args = parser.parse_args()
 
@@ -226,6 +243,12 @@ def main():
     else:
         print("[Strategy8-U-NC][Probe pool] No --gdino_model given → 3D features (s_gdino=0)")
 
+    image_filter = None
+    if args.image_list_file:
+        with open(args.image_list_file) as f:
+            image_filter = json.load(f)
+        print(f"[Strategy8-U-NC][Probe pool] Filtering to {len(image_filter)} images from {args.image_list_file}")
+
     build_probe_pool_cache(
         candidate_pool_cache=cache,
         image_dir=args.image_folder,
@@ -239,6 +262,7 @@ def main():
         seed=args.seed,
         min_K=(args.min_K if args.min_K > 0 else None),
         max_owlvit_candidates=args.max_owlvit_candidates,
+        image_filter=image_filter,
     )
 
 

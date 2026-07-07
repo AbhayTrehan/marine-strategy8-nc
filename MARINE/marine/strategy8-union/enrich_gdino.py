@@ -36,15 +36,23 @@ def enrich_candidate_cache_with_gdino(
     image_dir: str,
     gdino_scorer,
     output_path: str,
+    image_filter: Optional[List[str]] = None,
 ) -> None:
     """Reads the existing cache, adds s_gdino to each candidate, writes
-    an enriched version."""
+    an enriched version. If image_filter is given, only those images are
+    processed (the rest are silently skipped)."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
 
+    if image_filter is not None:
+        image_filter_set = set(image_filter)
+        items = [(img, rec) for img, rec in candidate_pool_cache.items() if img in image_filter_set]
+    else:
+        items = list(candidate_pool_cache.items())
+
     n_done = 0
-    n_total = len(candidate_pool_cache)
+    n_total = len(items)
     with open(output_path, "w") as out_f:
-        for img_file, rec in candidate_pool_cache.items():
+        for img_file, rec in items:
             candidates = rec["candidates"]
             words = [c["canonical"] for c in candidates]
 
@@ -79,6 +87,8 @@ def main():
     parser.add_argument("--image_folder", type=str, default="./data/coco/val2014")
     parser.add_argument("--gdino_model", type=str, default="IDEA-Research/grounding-dino-tiny",
                         help="HF model name/path (via transformers' AutoModelForZeroShotObjectDetection)")
+    parser.add_argument("--image_list_file", type=str, default=None,
+                        help="JSON list of image filenames to process; if omitted, all images")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_file", type=str, required=True)
     args = parser.parse_args()
@@ -89,7 +99,14 @@ def main():
     cache = load_candidate_pool_cache(args.candidate_pool_cache)
     scorer = GDINOScorer(model_name=args.gdino_model, device=args.device)
 
-    enrich_candidate_cache_with_gdino(cache, args.image_folder, scorer, args.output_file)
+    image_filter = None
+    if args.image_list_file:
+        import json as _json
+        with open(args.image_list_file) as f:
+            image_filter = _json.load(f)
+
+    enrich_candidate_cache_with_gdino(cache, args.image_folder, scorer, args.output_file,
+                                      image_filter=image_filter)
 
 
 if __name__ == "__main__":
